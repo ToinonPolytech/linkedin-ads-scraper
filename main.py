@@ -13,7 +13,7 @@ from src.models import LinkedInAd
 from src.crawler import AsyncLinkedInCrawler
 from src.logger import setup_logger
 from src.database import Base, engine, AsyncSessionLocal, get_db
-from src.config import proxy_config
+from src.config import brightdata_config
 
 logger = setup_logger("linkedin_crawler", log_level=logging.INFO)
 
@@ -34,7 +34,7 @@ app = FastAPI(lifespan=lifespan, title="LinkedIn Ad Scraper")
 async def root():
     return {
         "service": "LinkedIn Ad Scraper",
-        "proxy": "BrightData ACTIVE" if proxy_config.is_configured() else "NOT CONFIGURED",
+        "brightdata": f"{brightdata_config.get_mode().upper()} ACTIVE" if brightdata_config.is_configured() else "NOT CONFIGURED",
         "endpoints": {
             "/crawl?company_id=X": "Start scraping (runs in background)",
             "/status/{job_id}": "Check scraping job status",

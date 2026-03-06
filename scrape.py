@@ -35,7 +35,7 @@ from playwright.async_api import async_playwright
 from src.database import init_db, AsyncSessionLocal
 from src.crawler import AsyncLinkedInCrawler
 from src.utils import setup_browser_context
-from src.config import proxy_config
+from src.config import brightdata_config
 from src.logger import setup_logger
 from sqlalchemy import text
 
@@ -146,11 +146,14 @@ async def main():
     logger.info(f"Company ID/Name: {company_id}")
 
     # Show proxy status
-    if proxy_config.is_configured():
-        logger.info(f"BrightData proxy: ACTIVE ({proxy_config.HOST}:{proxy_config.PORT})")
+    mode = brightdata_config.get_mode()
+    if mode == "scraping_browser":
+        logger.info("BrightData Scraping Browser: ACTIVE (cloud browser + auto proxy rotation)")
+    elif mode == "residential_proxy":
+        logger.info(f"BrightData Residential Proxy: ACTIVE ({brightdata_config.HOST}:{brightdata_config.PORT})")
     else:
-        logger.warning("No proxy configured — scraping without proxy rotation")
-        logger.warning("Set BRIGHTDATA_USERNAME and BRIGHTDATA_PASSWORD in .env to enable proxies")
+        logger.warning("No BrightData configured — scraping without proxy rotation")
+        logger.warning("Set SBR_WS_ENDPOINT in .env for Scraping Browser")
 
     # Init database
     await init_db()

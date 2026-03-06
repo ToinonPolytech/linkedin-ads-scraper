@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Rotating user agents for anti-detection
+# Rotating user agents (fallback when not using Scraping Browser)
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -60,33 +60,53 @@ class LogConfig:
     DEBUG = logging.DEBUG
 
 
-class ProxyConfig:
-    """BrightData proxy configuration.
+class BrightDataConfig:
+    """BrightData configuration — supports Scraping Browser, Residential Proxies, or Web Unlocker.
 
-    Set these in your .env file:
-        BRIGHTDATA_HOST=brd.superproxy.io
-        BRIGHTDATA_PORT=22225
+    Set ONE of these in your .env:
+
+    Option 1 — Scraping Browser (RECOMMENDED):
+        SBR_WS_ENDPOINT=wss://brd-customer-XXXXX-zone-XXXXX:PASSWORD@brd.superproxy.io:9222
+
+    Option 2 — Residential Proxy:
         BRIGHTDATA_USERNAME=brd-customer-XXXXX-zone-XXXXX
         BRIGHTDATA_PASSWORD=XXXXX
+        BRIGHTDATA_HOST=brd.superproxy.io  (optional, default)
+        BRIGHTDATA_PORT=22225              (optional, default)
     """
+
+    # Scraping Browser (preferred)
+    SBR_WS_ENDPOINT = os.getenv("SBR_WS_ENDPOINT", "")
+
+    # Residential Proxy (fallback)
     HOST = os.getenv("BRIGHTDATA_HOST", "brd.superproxy.io")
     PORT = int(os.getenv("BRIGHTDATA_PORT", "22225"))
     USERNAME = os.getenv("BRIGHTDATA_USERNAME", "")
     PASSWORD = os.getenv("BRIGHTDATA_PASSWORD", "")
 
     @classmethod
-    def is_configured(cls) -> bool:
+    def has_scraping_browser(cls) -> bool:
+        return bool(cls.SBR_WS_ENDPOINT)
+
+    @classmethod
+    def has_residential_proxy(cls) -> bool:
         return bool(cls.USERNAME and cls.PASSWORD)
 
     @classmethod
-    def get_proxy_url(cls) -> Optional[str]:
-        if not cls.is_configured():
-            return None
-        return f"http://{cls.USERNAME}:{cls.PASSWORD}@{cls.HOST}:{cls.PORT}"
+    def is_configured(cls) -> bool:
+        return cls.has_scraping_browser() or cls.has_residential_proxy()
+
+    @classmethod
+    def get_mode(cls) -> str:
+        if cls.has_scraping_browser():
+            return "scraping_browser"
+        if cls.has_residential_proxy():
+            return "residential_proxy"
+        return "none"
 
     @classmethod
     def get_playwright_proxy(cls) -> Optional[dict]:
-        if not cls.is_configured():
+        if not cls.has_residential_proxy():
             return None
         return {
             "server": f"http://{cls.HOST}:{cls.PORT}",
@@ -98,6 +118,7 @@ class ProxyConfig:
 class Settings(BaseSettings):
     DB_PATH: str = "linkedin_ads.db"
     ENVIRONMENT: str = "development"
+    SBR_WS_ENDPOINT: str = ""
     BRIGHTDATA_HOST: str = "brd.superproxy.io"
     BRIGHTDATA_PORT: str = "22225"
     BRIGHTDATA_USERNAME: str = ""
@@ -115,7 +136,7 @@ def get_settings() -> Settings:
 browser_config = BrowserConfig()
 crawler_config = CrawlerConfig()
 log_config = LogConfig()
-proxy_config = ProxyConfig()
+brightdata_config = BrightDataConfig()
 
 MAX_CONCURRENT_PAGES = browser_config.MAX_CONCURRENT_PAGES
 VIEWPORT_CONFIG = browser_config.VIEWPORT

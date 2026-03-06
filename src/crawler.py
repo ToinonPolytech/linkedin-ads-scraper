@@ -4,7 +4,7 @@ import asyncio
 from .config import (
     crawler_config,
     browser_config,
-    proxy_config,
+    brightdata_config,
     MAX_CONCURRENT_PAGES,
     VIEWPORT_CONFIG,
     RETRY_COUNT,
@@ -156,7 +156,7 @@ class AsyncLinkedInCrawler:
             pages = []
 
             for i in range(MAX_CONCURRENT_PAGES):
-                if proxy_config.is_configured():
+                if brightdata_config.is_configured():
                     context = await create_new_context_with_proxy(browser)
                 else:
                     context = await browser.new_context(
@@ -207,7 +207,7 @@ class AsyncLinkedInCrawler:
         except Exception:
             pass
 
-        if proxy_config.is_configured():
+        if brightdata_config.is_configured():
             new_context = await create_new_context_with_proxy(browser)
         else:
             new_context = await browser.new_context(
@@ -235,7 +235,7 @@ class AsyncLinkedInCrawler:
                 ad_details = await self.extract_ad_details(pages[page_index], url)
 
                 # Handle rate limit — rotate proxy and retry
-                if ad_details == "RATE_LIMITED" and browser and proxy_config.is_configured():
+                if ad_details == "RATE_LIMITED" and browser and brightdata_config.is_configured():
                     self._rate_limit_hits += 1
                     self.logger.warning(f"Rate limited — rotating proxy (hit #{self._rate_limit_hits})")
                     await self._rotate_proxy(browser, page_index, pages, contexts)

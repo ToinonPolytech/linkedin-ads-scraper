@@ -7,7 +7,7 @@ from .models import LinkedInAd
 from .database import AsyncSessionLocal, engine, Base
 from .config import (
     VIEWPORT_CONFIG, NAVIGATION_TIMEOUT,
-    get_random_user_agent, proxy_config,
+    get_random_user_agent, brightdata_config,
 )
 import time
 import logging
@@ -65,14 +65,27 @@ def generate_linkedin_url(company_id: str) -> str:
 
 
 async def setup_browser_context(playwright):
-    """Configure browser with optional BrightData proxy and rotating user-agent."""
-    proxy = proxy_config.get_playwright_proxy()
-    user_agent = get_random_user_agent()
+    """Set up browser — uses BrightData Scraping Browser if configured, otherwise local."""
+    mode = brightdata_config.get_mode()
 
-    if proxy:
-        logger.info(f"Using BrightData proxy: {proxy_config.HOST}:{proxy_config.PORT}")
+    # ── Option 1: BrightData Scraping Browser (cloud browser, auto proxy rotation) ──
+    if mode == "scraping_browser":
+        endpoint = brightdata_config.SBR_WS_ENDPOINT
+        logger.info(f"Connecting to BrightData Scraping Browser...")
+        browser = await playwright.chromium.connect_over_cdp(endpoint)
+        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+        logger.info("Connected to Scraping Browser (cloud browser with auto proxy + anti-detect)")
+        return browser, context
+
+    # ── Option 2: Local browser + BrightData residential proxy ──
+    if mode == "residential_proxy":
+        proxy = brightdata_config.get_playwright_proxy()
+        logger.info(f"Using BrightData residential proxy: {brightdata_config.HOST}:{brightdata_config.PORT}")
     else:
-        logger.warning("No proxy configured — running without proxy rotation")
+        proxy = None
+        logger.warning("No BrightData configured — running without proxy rotation")
+
+    user_agent = get_random_user_agent()
 
     browser = await playwright.chromium.launch(
         headless=True,
@@ -102,7 +115,6 @@ async def setup_browser_context(playwright):
         }
     )
 
-    # Block unnecessary resources (keep images for ad content)
     await context.route("**/*.{css,font,woff,woff2}",
         lambda route: route.abort())
 
@@ -113,8 +125,19 @@ async def setup_browser_context(playwright):
 
 
 async def create_new_context_with_proxy(browser):
-    """Create a fresh browser context with a new proxy session (new IP via BrightData)."""
-    proxy = proxy_config.get_playwright_proxy()
+    """Create a fresh context for proxy rotation.
+
+    - Scraping Browser: reconnect for new IP
+    - Residential proxy: new context = new session = new IP
+    """
+    mode = brightdata_config.get_mode()
+
+    if mode == "scraping_browser":
+        # Scraping Browser auto-rotates; new context suffices
+        context = browser.contexts[0] if browser.contexts else await browser.new_context()
+        return context
+
+    proxy = brightdata_config.get_playwright_proxy()
     user_agent = get_random_user_agent()
 
     context = await browser.new_context(
