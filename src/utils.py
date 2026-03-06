@@ -118,8 +118,8 @@ async def setup_browser_context(playwright):
     await context.route("**/*.{css,font,woff,woff2}",
         lambda route: route.abort())
 
-    await context.set_default_timeout(NAVIGATION_TIMEOUT)
-    await context.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+    context.set_default_timeout(NAVIGATION_TIMEOUT)
+    context.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
 
     return browser, context
 
@@ -159,8 +159,8 @@ async def create_new_context_with_proxy(browser):
     await context.route("**/*.{css,font,woff,woff2}",
         lambda route: route.abort())
 
-    await context.set_default_timeout(NAVIGATION_TIMEOUT)
-    await context.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
+    context.set_default_timeout(NAVIGATION_TIMEOUT)
+    context.set_default_navigation_timeout(NAVIGATION_TIMEOUT)
 
     return context
 
