@@ -1,0 +1,17 @@
+# .gitignore
+__pycache__/
+.pytest_cache
+logs/
+.env
+.env.yaml
+
+# Virtual Environment
+.venv
+venv/
+
+# Database
+*.db
+
+# Exports
+ads_*.json
+ads_*.csv

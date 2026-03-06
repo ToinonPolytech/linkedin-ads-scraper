@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(git clone https://github.com/wukimidaire/linkedin_ads_scraper.git /Users/toino/linkedin-ads-scraper)",
+      "Bash(psql --version)",
+      "Bash(brew list postgresql)",
+      "Bash(python3 -m venv /Users/toino/linkedin-ads-scraper/venv)",
+      "Bash(source /Users/toino/linkedin-ads-scraper/venv/bin/activate)",
+      "Bash(pip install --upgrade pip)",
+      "Bash(pip install -r /Users/toino/linkedin-ads-scraper/requirements.txt)",
+      "Bash(python -m playwright install chromium)",
+      "Bash(source venv/bin/activate)",
+      "Bash(python -c \":*)"
+    ]
+  }
+}
