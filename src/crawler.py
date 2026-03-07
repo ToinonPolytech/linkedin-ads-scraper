@@ -360,6 +360,19 @@ class AsyncLinkedInCrawler:
 
             ad_data['ad_type'] = 'personal_ad' if 'linkedin.com/in/' in html_content else 'company_ad'
 
+            # Extract "promoted by" info for personal ads
+            promoted_by_match = re.search(
+                r'Promoted\s+by\s+<a[^>]*href="https://www\.linkedin\.com/company/(\d+)[^"]*"[^>]*>\s*([^<]+)\s*</a>',
+                html_content
+            )
+            if promoted_by_match:
+                ad_data['promoted_text'] = f"Promoted by {promoted_by_match.group(2).strip()}"
+            else:
+                # Alternative: plain text "Promoted by CompanyName"
+                promoted_text_match = re.search(r'Promoted\s+by\s+([^<\n]+)', html_content)
+                if promoted_text_match:
+                    ad_data['promoted_text'] = f"Promoted by {promoted_text_match.group(1).strip()}"
+
             redirect_match = re.search(r'<a[^>]*href="([^"]+)"[^>]*data-tracking-control-name="ad_library_ad_preview_headline_content"[^>]*>', html_content)
             if redirect_match:
                 full_url = redirect_match.group(1)

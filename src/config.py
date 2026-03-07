@@ -29,7 +29,7 @@ class BrowserConfig:
     VIEWPORT = {'width': 1280, 'height': 800}
     PAGE_TIMEOUT = 60000
     NAVIGATION_TIMEOUT = 60000
-    MAX_CONCURRENT_PAGES = 5
+    MAX_CONCURRENT_PAGES = 100
     CHUNK_SIZE = 10
     RETRY_COUNT = 3
     RETRY_DELAY = 5
@@ -51,6 +51,11 @@ class CrawlerConfig:
     MAX_RETRIES = 3
     RETRY_DELAY = 5
     PARALLEL_CHUNKS = 2
+
+    # Discovery mode settings
+    DISCOVERY_MAX_SCROLL_COUNT = 500
+    DISCOVERY_CONCURRENT_COUNTRIES = 3
+    DEFAULT_COUNTRIES = ["US", "GB", "DE", "FR", "CA", "AU", "IN", "BR", "NL", "SE"]
 
 
 class LogConfig:

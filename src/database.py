@@ -46,7 +46,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 async def init_db():
-    from src.models import LinkedInAd
+    from src.models import LinkedInAd, Company
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     print(f"Database initialized at {DB_PATH}")

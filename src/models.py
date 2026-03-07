@@ -7,6 +7,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+class Company(Base):
+    __tablename__ = "companies"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    advertiser_name: Mapped[str] = mapped_column(String, unique=True, index=True)
+    company_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    company_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    profile_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ad_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    promoted_by_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    promoted_by_company_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    first_seen_country: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class LinkedInAd(Base):
     __tablename__ = "linkedin_ads"
 

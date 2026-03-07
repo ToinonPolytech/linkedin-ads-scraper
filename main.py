@@ -8,12 +8,13 @@ import logging
 import json
 from contextlib import asynccontextmanager
 
-from src.utils import init_db, generate_linkedin_url, setup_browser_context
-from src.models import LinkedInAd
+from src.utils import init_db, generate_linkedin_url, setup_browser_context, backfill_companies_from_ads
+from src.models import LinkedInAd, Company
 from src.crawler import AsyncLinkedInCrawler
+from src.discovery import run_parallel_discovery
 from src.logger import setup_logger
 from src.database import Base, engine, AsyncSessionLocal, get_db
-from src.config import brightdata_config
+from src.config import brightdata_config, crawler_config
 
 logger = setup_logger("linkedin_crawler", log_level=logging.INFO)
 
@@ -38,6 +39,8 @@ async def root():
         "endpoints": {
             "/crawl?company_id=X": "Start scraping (runs in background)",
             "/status/{job_id}": "Check scraping job status",
+            "/discover?countries=US,UK": "Start company discovery job",
+            "/companies": "List all discovered companies",
             "/check-ads/{company_id}": "Get all ads for a company",
             "/check-ad/{ad_id}": "Get a specific ad",
             "/export/{company_id}": "Export ads as JSON",
@@ -155,6 +158,111 @@ async def check_ad(ad_id: str, db: AsyncSession = Depends(get_db)):
     if not ad:
         raise HTTPException(status_code=404, detail="Ad not found")
     return dict(ad)
+
+
+async def _run_discovery(country_codes: list, job_id: str):
+    """Background discovery task."""
+    _active_jobs[job_id]["status"] = "running"
+    try:
+        async with async_playwright() as playwright:
+            results = await run_parallel_discovery(
+                country_codes,
+                max_parallel=crawler_config.DISCOVERY_CONCURRENT_COUNTRIES,
+                playwright=playwright
+            )
+
+        _active_jobs[job_id]["status"] = "completed"
+        _active_jobs[job_id]["results"] = results
+        _active_jobs[job_id]["completed_at"] = datetime.now().isoformat()
+        logger.info(f"Job {job_id}: Discovery completed")
+
+    except Exception as e:
+        _active_jobs[job_id]["status"] = "failed"
+        _active_jobs[job_id]["error"] = str(e)
+        logger.error(f"Job {job_id}: Discovery failed — {str(e)}")
+
+
+@app.get("/discover")
+async def discover(countries: str, background_tasks: BackgroundTasks):
+    """Start a company discovery job. Scrolls listing pages by country."""
+    country_list = [c.strip().upper() for c in countries.split(",")]
+    job_id = f"discover_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    _active_jobs[job_id] = {
+        "type": "discovery",
+        "countries": country_list,
+        "status": "queued",
+        "started_at": datetime.now().isoformat(),
+    }
+    background_tasks.add_task(_run_discovery, country_list, job_id)
+    return {"status": "started", "job_id": job_id, "track_at": f"/status/{job_id}"}
+
+
+@app.get("/companies")
+async def list_companies(
+    limit: int = 100,
+    offset: int = 0,
+    ad_type: str = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """List discovered companies."""
+    query = "SELECT * FROM companies"
+    params = {}
+    if ad_type:
+        query += " WHERE ad_type = :ad_type"
+        params["ad_type"] = ad_type
+    query += " ORDER BY created_at DESC LIMIT :limit OFFSET :offset"
+    params["limit"] = limit
+    params["offset"] = offset
+
+    result = await db.execute(text(query), params)
+    companies = result.mappings().all()
+
+    count_result = await db.execute(text("SELECT COUNT(*) FROM companies"))
+    total = count_result.scalar()
+
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "companies": [dict(c) for c in companies]
+    }
+
+
+@app.get("/companies/{advertiser_name}")
+async def get_company(advertiser_name: str, db: AsyncSession = Depends(get_db)):
+    """Get a specific company by advertiser name."""
+    result = await db.execute(
+        text("SELECT * FROM companies WHERE advertiser_name = :name"),
+        {"name": advertiser_name}
+    )
+    company = result.mappings().first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+    return dict(company)
+
+
+@app.get("/export/companies")
+async def export_companies_api(
+    ad_type: str = None,
+    db: AsyncSession = Depends(get_db)
+):
+    """Export all discovered companies as JSON."""
+    query = "SELECT * FROM companies"
+    params = {}
+    if ad_type:
+        query += " WHERE ad_type = :ad_type"
+        params["ad_type"] = ad_type
+    query += " ORDER BY id"
+    result = await db.execute(text(query), params)
+    companies = result.mappings().all()
+    data = []
+    for c in companies:
+        d = dict(c)
+        for k, v in d.items():
+            if hasattr(v, 'isoformat'):
+                d[k] = v.isoformat()
+        data.append(d)
+    return {"total": len(data), "companies": data}
 
 
 @app.get("/export/{company_id}")

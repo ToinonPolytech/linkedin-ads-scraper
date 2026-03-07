@@ -3,7 +3,7 @@ import re
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 import asyncio
-from .models import LinkedInAd
+from .models import LinkedInAd, Company
 from .database import AsyncSessionLocal, engine, Base
 from .config import (
     VIEWPORT_CONFIG, NAVIGATION_TIMEOUT,
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 async def init_db():
-    from src.models import LinkedInAd
+    from src.models import LinkedInAd, Company
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables created successfully")
@@ -182,3 +182,79 @@ class CrawlerMetrics:
     def get_success_rate(self):
         total = self.successful_requests + self.failed_requests
         return (self.successful_requests / total * 100) if total > 0 else 0
+
+
+def generate_discovery_url(country_code: str) -> str:
+    """Build a LinkedIn Ad Library listing URL for country-based discovery."""
+    return f"https://www.linkedin.com/ad-library/search?countries={country_code.upper()}"
+
+
+async def get_known_advertiser_names(db) -> set:
+    """Load all known advertiser names from the companies table for O(1) lookup."""
+    from sqlalchemy import select as sa_select
+    result = await db.execute(sa_select(Company.advertiser_name))
+    return set(row[0] for row in result.all())
+
+
+async def upsert_company(db, company_data: dict) -> str:
+    """Insert or update a company record. Returns 'new', 'updated', or 'existing'."""
+    from sqlalchemy import select as sa_select
+    existing = await db.execute(
+        sa_select(Company).where(Company.advertiser_name == company_data['advertiser_name'])
+    )
+    existing = existing.scalars().first()
+
+    if existing:
+        needs_update = False
+        for field in ['company_id', 'company_url', 'profile_url', 'ad_type',
+                      'promoted_by_name', 'promoted_by_company_id']:
+            new_val = company_data.get(field)
+            if new_val and not getattr(existing, field):
+                setattr(existing, field, new_val)
+                needs_update = True
+        if needs_update:
+            await db.commit()
+            return 'updated'
+        return 'existing'
+    else:
+        valid_cols = set(Company.__table__.columns.keys())
+        filtered = {k: v for k, v in company_data.items() if k in valid_cols}
+        company = Company(**filtered)
+        db.add(company)
+        await db.commit()
+        return 'new'
+
+
+async def backfill_companies_from_ads(db):
+    """Populate companies table from existing linkedin_ads data."""
+    from sqlalchemy import select as sa_select
+    result = await db.execute(
+        sa_select(
+            LinkedInAd.advertiser_name,
+            LinkedInAd.company_id,
+            LinkedInAd.ad_type
+        ).where(LinkedInAd.advertiser_name.isnot(None))
+        .group_by(LinkedInAd.advertiser_name)
+    )
+
+    new_count = 0
+    for row in result.all():
+        name, company_id, ad_type = row
+        exists = await db.execute(
+            sa_select(Company).where(Company.advertiser_name == name)
+        )
+        if exists.scalars().first():
+            continue
+
+        company = Company(
+            advertiser_name=name,
+            company_id=company_id if ad_type == 'company_ad' else None,
+            ad_type=ad_type,
+            company_url=f"https://www.linkedin.com/company/{company_id}" if company_id and ad_type == 'company_ad' else None,
+        )
+        db.add(company)
+        new_count += 1
+
+    await db.commit()
+    logger.info(f"Backfilled {new_count} companies from existing ads")
+    return new_count
