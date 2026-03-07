@@ -13,7 +13,7 @@ from .config import (
     CHUNK_SIZE,
     get_random_user_agent,
 )
-from .utils import clean_text, clean_percentage, format_date, create_new_context_with_proxy
+from .utils import clean_text, clean_percentage, format_date, create_new_context_with_proxy, create_fresh_sbr_connection
 from src.logger import setup_logger
 import re
 from datetime import datetime, date
@@ -134,8 +134,8 @@ class AsyncLinkedInCrawler:
         except Exception as e:
             self.logger.error(f"Failed to collect URLs: {str(e)}")
 
-    async def process_all_ads(self, page: Page, db: AsyncSession) -> int:
-        """Process all collected ad URLs with proxy rotation on rate limits."""
+    async def process_all_ads(self, page: Page, db: AsyncSession, playwright=None) -> int:
+        """Process all collected ad URLs in batches for optimal throughput."""
         processing_start = time.time()
         total_ads = len(self.detail_urls)
 
@@ -143,131 +143,121 @@ class AsyncLinkedInCrawler:
             self.logger.warning("No ads found to process")
             return 0
 
-        start_time = datetime.now()
-        new_ads = 0
-        updated_ads = 0
-        existing_ads = 0
+        batch_size = MAX_CONCURRENT_PAGES
+        use_sbr = brightdata_config.has_scraping_browser() and playwright is not None
+        self.logger.info(
+            f"Starting BATCH processing of {total_ads} ads "
+            f"(batch size: {batch_size}, mode: {'fresh_sbr' if use_sbr else 'shared_browser'})"
+        )
 
-        self.logger.info(f"Starting processing of {total_ads} ads")
+        self._new_ads = 0
+        self._updated_ads = 0
+        self._existing_ads = 0
+        self._processed_count = 0
+        self._rate_limit_hits = 0
+        self._batch_rate_limits = 0
+        self._db_lock = asyncio.Lock()
+        self._playwright = playwright
 
-        try:
-            browser = page.context.browser
-            contexts = []
-            pages = []
+        browser = page.context.browser
+        urls = list(self.detail_urls)
+        batch_delay = 3  # seconds between batches
 
-            for i in range(MAX_CONCURRENT_PAGES):
-                if brightdata_config.is_configured():
-                    context = await create_new_context_with_proxy(browser)
-                else:
-                    context = await browser.new_context(
-                        viewport=VIEWPORT_CONFIG,
-                        user_agent=get_random_user_agent()
-                    )
-                contexts.append(context)
-                pages.append(await context.new_page())
+        for i in range(0, len(urls), batch_size):
+            batch = urls[i:i + batch_size]
+            batch_num = (i // batch_size) + 1
+            total_batches = (len(urls) + batch_size - 1) // batch_size
 
-            new_ads, updated_ads, existing_ads = await self.process_urls(
-                list(self.detail_urls), pages, db, browser
-            )
+            self._batch_rate_limits = 0
+            tasks = [self._process_single_ad(url, browser, db, total_ads) for url in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            total_time = time.time() - processing_start
-            if total_ads > 0:
-                self.metrics['success_rate'] = ((total_ads - len(self.metrics['failed_urls'])) / total_ads) * 100
-                if self.metrics['processing_times']:
-                    self.metrics['avg_processing_time'] = sum(self.metrics['processing_times']) / len(self.metrics['processing_times'])
-
+            # Log progress
+            pct = (self._processed_count / total_ads) * 100
             self.logger.info(
-                f"\nPerformance Metrics:\n"
-                f"- Total Processing Time: {total_time:.2f}s\n"
-                f"- Average Processing Time: {self.metrics['avg_processing_time']:.2f}s\n"
-                f"- Success Rate: {self.metrics['success_rate']:.1f}%\n"
-                f"- Failed URLs: {len(self.metrics['failed_urls'])}\n"
-                f"- Rate Limit Hits: {self._rate_limit_hits}\n"
-                f"- New Ads: {new_ads}\n"
-                f"- Updated Ads: {updated_ads}\n"
-                f"- Existing Ads: {existing_ads}"
+                f"Batch {batch_num}/{total_batches} done — "
+                f"Progress: {self._processed_count}/{total_ads} ({pct:.1f}%) "
+                f"— New: {self._new_ads} Updated: {self._updated_ads} "
+                f"Existing: {self._existing_ads} RateLimits: {self._rate_limit_hits}"
             )
 
+            # Adaptive delay: increase pause if this batch had rate limits
+            if self._batch_rate_limits > 0:
+                batch_delay = min(batch_delay + 5, 30)
+                self.logger.info(f"Rate limits detected, increasing batch delay to {batch_delay}s")
+            elif batch_delay > 3:
+                batch_delay = max(batch_delay - 1, 3)
+
+            await asyncio.sleep(batch_delay)
+
+        total_time = time.time() - processing_start
+        processed_count = self._new_ads + self._updated_ads + self._existing_ads
+
+        self.logger.info(
+            f"\nPerformance Metrics:\n"
+            f"- Total Processing Time: {total_time:.2f}s\n"
+            f"- Batch Size: {batch_size}\n"
+            f"- Ads/second: {processed_count / max(total_time, 1):.1f}\n"
+            f"- Failed URLs: {len(self.metrics['failed_urls'])}\n"
+            f"- Rate Limit Hits: {self._rate_limit_hits}\n"
+            f"- New Ads: {self._new_ads}\n"
+            f"- Updated Ads: {self._updated_ads}\n"
+            f"- Existing Ads: {self._existing_ads}"
+        )
+
+        return processed_count
+
+    async def _process_single_ad(self, url: str, browser, db: AsyncSession, total: int):
+        """Process a single ad URL. Uses fresh SBR connection if available, else shared browser."""
+        sbr_browser = None
+        context = None
+        try:
+            if brightdata_config.has_scraping_browser() and self._playwright:
+                # Fresh CDP connection = fresh IP per worker
+                sbr_browser, context, page = await create_fresh_sbr_connection(self._playwright)
+            elif brightdata_config.has_residential_proxy():
+                context = await create_new_context_with_proxy(browser)
+                page = await context.new_page()
+            else:
+                context = await browser.new_context(
+                    viewport=VIEWPORT_CONFIG,
+                    user_agent=get_random_user_agent()
+                )
+                page = await context.new_page()
+
+            ad_details = await self.extract_ad_details(page, url)
+
+            if ad_details and ad_details != "RATE_LIMITED":
+                async with self._db_lock:
+                    status = await self.upsert_ad(db, ad_details)
+                    if status == 'new':
+                        self._new_ads += 1
+                    elif status == 'updated':
+                        self._updated_ads += 1
+                    elif status == 'existing':
+                        self._existing_ads += 1
+                    self._processed_count += 1
+
+            elif ad_details == "RATE_LIMITED":
+                self._rate_limit_hits += 1
+                self._batch_rate_limits += 1
+                self.metrics['failed_urls'].add(url)
+
+        except Exception as e:
+            self.logger.error(f"Worker failed for {url}: {str(e)}")
+            self.metrics['failed_urls'].add(url)
         finally:
-            for context in contexts:
+            # Close SBR browser connection (not just context)
+            if sbr_browser:
+                try:
+                    await sbr_browser.close()
+                except Exception:
+                    pass
+            elif context:
                 try:
                     await context.close()
                 except Exception:
                     pass
-
-        processed_count = new_ads + updated_ads + existing_ads
-        return processed_count
-
-    async def _rotate_proxy(self, browser, page_index: int, pages: list, contexts: list):
-        """Rotate to a new proxy by creating a fresh context (new BrightData session = new IP)."""
-        self.logger.info(f"Rotating proxy for page index {page_index}")
-        try:
-            old_context = contexts[page_index]
-            await old_context.close()
-        except Exception:
-            pass
-
-        if brightdata_config.is_configured():
-            new_context = await create_new_context_with_proxy(browser)
-        else:
-            new_context = await browser.new_context(
-                viewport=VIEWPORT_CONFIG,
-                user_agent=get_random_user_agent()
-            )
-
-        contexts[page_index] = new_context
-        pages[page_index] = await new_context.new_page()
-        self.logger.info(f"Proxy rotated — new user-agent and IP for page {page_index}")
-
-    async def process_urls(self, urls: list, pages: list, db: AsyncSession, browser=None) -> tuple:
-        """Process URLs with automatic proxy rotation on rate limits."""
-        new_ads = updated_ads = existing_ads = 0
-        total_urls = len(urls)
-        processed_count = 0
-        consecutive_existing_count = 0
-
-        # Keep track of contexts for rotation
-        contexts = [p.context for p in pages]
-
-        for i, url in enumerate(urls):
-            page_index = i % len(pages)
-            try:
-                ad_details = await self.extract_ad_details(pages[page_index], url)
-
-                # Handle rate limit — rotate proxy and retry
-                if ad_details == "RATE_LIMITED" and browser and brightdata_config.is_configured():
-                    self._rate_limit_hits += 1
-                    self.logger.warning(f"Rate limited — rotating proxy (hit #{self._rate_limit_hits})")
-                    await self._rotate_proxy(browser, page_index, pages, contexts)
-                    await asyncio.sleep(5)
-                    ad_details = await self.extract_ad_details(pages[page_index], url)
-
-                if ad_details and ad_details != "RATE_LIMITED":
-                    status = await self.upsert_ad(db, ad_details)
-                    if status == 'new':
-                        new_ads += 1
-                        consecutive_existing_count = 0
-                    elif status == 'updated':
-                        updated_ads += 1
-                        consecutive_existing_count = 0
-                    elif status == 'existing':
-                        existing_ads += 1
-                        consecutive_existing_count += 1
-
-                    if consecutive_existing_count > 30:
-                        self.logger.info("Aborting — 30+ consecutive existing ads")
-                        break
-
-                processed_count += 1
-                if processed_count % 10 == 0:
-                    self.logger.info(f"Progress: {processed_count}/{total_urls} ({(processed_count/total_urls)*100:.1f}%)")
-
-            except Exception as e:
-                self.logger.error(f"Failed to process URL {url}: {str(e)}")
-                self.metrics['failed_urls'].add(url)
-
-        self.logger.info(f"Results — New: {new_ads}, Updated: {updated_ads}, Existing: {existing_ads}")
-        return new_ads, updated_ads, existing_ads
 
     async def extract_ad_details(self, page: Page, url: str) -> dict:
         """Extract details from a single ad page with retry logic."""

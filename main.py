@@ -70,7 +70,7 @@ async def _run_scrape(company_id: str, job_id: str):
             _active_jobs[job_id]["urls_found"] = len(crawler.detail_urls)
 
             async with AsyncSessionLocal() as db:
-                processed_count = await crawler.process_all_ads(page, db)
+                processed_count = await crawler.process_all_ads(page, db, playwright=playwright)
 
             await browser.close()
 

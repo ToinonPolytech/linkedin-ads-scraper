@@ -124,19 +124,17 @@ async def setup_browser_context(playwright):
     return browser, context
 
 
+async def create_fresh_sbr_connection(playwright):
+    """Create a brand new SBR CDP connection (fresh IP per connection)."""
+    endpoint = brightdata_config.SBR_WS_ENDPOINT
+    browser = await playwright.chromium.connect_over_cdp(endpoint)
+    context = browser.contexts[0] if browser.contexts else await browser.new_context()
+    page = await context.new_page()
+    return browser, context, page
+
+
 async def create_new_context_with_proxy(browser):
-    """Create a fresh context for proxy rotation.
-
-    - Scraping Browser: reconnect for new IP
-    - Residential proxy: new context = new session = new IP
-    """
-    mode = brightdata_config.get_mode()
-
-    if mode == "scraping_browser":
-        # Scraping Browser auto-rotates; new context suffices
-        context = browser.contexts[0] if browser.contexts else await browser.new_context()
-        return context
-
+    """Create a fresh context for residential proxy rotation."""
     proxy = brightdata_config.get_playwright_proxy()
     user_agent = get_random_user_agent()
 

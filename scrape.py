@@ -185,7 +185,7 @@ async def main():
             # Step 2: Process each ad
             logger.info("Step 2/2: Processing ad details...")
             async with AsyncSessionLocal() as db:
-                processed = await crawler.process_all_ads(page, db)
+                processed = await crawler.process_all_ads(page, db, playwright=playwright)
                 logger.info(f"Successfully processed {processed} ads")
 
         except KeyboardInterrupt:
