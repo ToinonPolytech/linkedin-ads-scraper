@@ -160,10 +160,14 @@ async def check_ad(ad_id: str, db: AsyncSession = Depends(get_db)):
     return dict(ad)
 
 
-async def _run_discovery(country_codes: list, job_id: str):
-    """Background discovery task."""
+async def _run_discovery_countries(country_codes: list, job_id: str, batch_size: int = 5):
+    """Background discovery task for country-based discovery."""
     _active_jobs[job_id]["status"] = "running"
     try:
+        import src.config as config
+        config.browser_config.MAX_CONCURRENT_PAGES = batch_size
+        config.MAX_CONCURRENT_PAGES = batch_size
+
         async with async_playwright() as playwright:
             results = await run_parallel_discovery(
                 country_codes,
@@ -182,18 +186,94 @@ async def _run_discovery(country_codes: list, job_id: str):
         logger.error(f"Job {job_id}: Discovery failed — {str(e)}")
 
 
+async def _run_discovery_url(custom_url: str, job_id: str, batch_size: int = 5):
+    """Background discovery task for custom URL discovery."""
+    from src.discovery import CompanyDiscoveryCrawler
+    from src.utils import create_fresh_sbr_connection
+    import src.config as config
+
+    _active_jobs[job_id]["status"] = "running"
+    try:
+        config.browser_config.MAX_CONCURRENT_PAGES = batch_size
+        config.MAX_CONCURRENT_PAGES = batch_size
+
+        async with async_playwright() as playwright:
+            crawler = CompanyDiscoveryCrawler(country_code="CUSTOM", custom_url=custom_url)
+
+            # Phase 1: Scroll
+            sbr_browser, context, page = await create_fresh_sbr_connection(playwright)
+            try:
+                async with AsyncSessionLocal() as db:
+                    unknown = await crawler.discover_from_listing(page, db)
+            finally:
+                await sbr_browser.close()
+
+            _active_jobs[job_id]["phase1"] = {
+                "cards_seen": crawler.total_cards_seen,
+                "unknown_found": len(unknown),
+                "known_skipped": crawler.known_count,
+            }
+            logger.info(
+                f"Job {job_id}: Scroll done — {crawler.total_cards_seen} cards, "
+                f"{len(unknown)} unknown, {crawler.known_count} known skipped"
+            )
+
+            # Phase 2: Process unknowns
+            if unknown:
+                _active_jobs[job_id]["status"] = "processing_details"
+                async with AsyncSessionLocal() as db:
+                    processed = await crawler.process_unknown_advertisers(db, playwright)
+                _active_jobs[job_id]["phase2"] = {"processed": processed}
+            else:
+                _active_jobs[job_id]["phase2"] = {"processed": 0, "note": "all advertisers already known"}
+
+        _active_jobs[job_id]["status"] = "completed"
+        _active_jobs[job_id]["completed_at"] = datetime.now().isoformat()
+        logger.info(f"Job {job_id}: Discovery completed")
+
+    except Exception as e:
+        _active_jobs[job_id]["status"] = "failed"
+        _active_jobs[job_id]["error"] = str(e)
+        logger.error(f"Job {job_id}: Discovery failed — {str(e)}")
+
+
 @app.get("/discover")
-async def discover(countries: str, background_tasks: BackgroundTasks):
-    """Start a company discovery job. Scrolls listing pages by country."""
-    country_list = [c.strip().upper() for c in countries.split(",")]
+async def discover(
+    background_tasks: BackgroundTasks,
+    countries: str = None,
+    url: str = None,
+    batch_size: int = 5,
+):
+    """Start a company discovery job.
+
+    Use either ?countries=US,UK or ?url=<linkedin_ad_library_url>
+    Optional: &batch_size=5 (concurrent detail page sessions)
+    """
+    if not countries and not url:
+        raise HTTPException(status_code=400, detail="Provide either 'countries' or 'url' parameter")
+
     job_id = f"discover_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    _active_jobs[job_id] = {
-        "type": "discovery",
-        "countries": country_list,
-        "status": "queued",
-        "started_at": datetime.now().isoformat(),
-    }
-    background_tasks.add_task(_run_discovery, country_list, job_id)
+
+    if url:
+        _active_jobs[job_id] = {
+            "type": "discovery_url",
+            "url": url,
+            "batch_size": batch_size,
+            "status": "queued",
+            "started_at": datetime.now().isoformat(),
+        }
+        background_tasks.add_task(_run_discovery_url, url, job_id, batch_size)
+    else:
+        country_list = [c.strip().upper() for c in countries.split(",")]
+        _active_jobs[job_id] = {
+            "type": "discovery_countries",
+            "countries": country_list,
+            "batch_size": batch_size,
+            "status": "queued",
+            "started_at": datetime.now().isoformat(),
+        }
+        background_tasks.add_task(_run_discovery_countries, country_list, job_id, batch_size)
+
     return {"status": "started", "job_id": job_id, "track_at": f"/status/{job_id}"}
 
 
