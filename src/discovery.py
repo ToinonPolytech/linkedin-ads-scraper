@@ -73,12 +73,15 @@ class CompanyDiscoveryCrawler:
             self.logger.debug(f"Scroll iteration {scroll_count}")
 
             try:
-                await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                await asyncio.wait_for(
+                    page.evaluate('window.scrollTo(0, document.body.scrollHeight)'),
+                    timeout=30
+                )
                 wait_time = crawler_config.BASE_SCROLL_WAIT + (consecutive_unchanged * crawler_config.SCROLL_INCREMENT)
                 await asyncio.sleep(wait_time)
 
                 # Extract card data: aria-label + detail link
-                cards_data = await page.evaluate("""() => {
+                cards_data = await asyncio.wait_for(page.evaluate("""() => {
                     const cards = document.querySelectorAll('.search-result-item');
                     return Array.from(cards).map(card => {
                         const ariaEl = card.querySelector('[aria-label]');
@@ -88,7 +91,7 @@ class CompanyDiscoveryCrawler:
                             detailUrl: detailLink ? detailLink.href.split('?')[0] : null
                         };
                     });
-                }""")
+                }"""), timeout=30)
 
                 current_card_count = len(cards_data)
                 new_cards = current_card_count - previous_card_count
@@ -138,15 +141,15 @@ class CompanyDiscoveryCrawler:
             if consecutive_unchanged >= crawler_config.MAX_UNCHANGED_SCROLLS:
                 # Final check: scroll to top and back
                 try:
-                    await page.evaluate('window.scrollTo(0, 0)')
+                    await asyncio.wait_for(page.evaluate('window.scrollTo(0, 0)'), timeout=15)
                     await asyncio.sleep(crawler_config.SCROLL_WAIT_TIME)
-                    await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                    await asyncio.wait_for(page.evaluate('window.scrollTo(0, document.body.scrollHeight)'), timeout=15)
                     await asyncio.sleep(crawler_config.SCROLL_WAIT_TIME)
 
-                    final_data = await page.evaluate("""() => {
+                    final_data = await asyncio.wait_for(page.evaluate("""() => {
                         const cards = document.querySelectorAll('.search-result-item');
                         return cards.length;
-                    }""")
+                    }"""), timeout=15)
 
                     if final_data > current_card_count:
                         self.logger.info(f"Final check found more cards, continuing...")
