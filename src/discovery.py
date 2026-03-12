@@ -92,9 +92,10 @@ class CompanyDiscoveryCrawler:
 
                 current_card_count = len(cards_data)
                 new_cards = current_card_count - previous_card_count
+                self.total_cards_seen = current_card_count  # actual DOM count
 
-                # Process new cards
-                for card in cards_data:
+                # Only process NEW cards (skip already-seen indices)
+                for card in cards_data[previous_card_count:]:
                     if not card.get('ariaLabel') or not card.get('detailUrl'):
                         continue
 
@@ -102,8 +103,6 @@ class CompanyDiscoveryCrawler:
                     name = card['ariaLabel'].split(',')[0].strip()
                     if not name:
                         continue
-
-                    self.total_cards_seen += 1
 
                     if name in seen_names:
                         continue
@@ -343,6 +342,167 @@ class CompanyDiscoveryCrawler:
             return
 
         await route.continue_()
+
+
+def generate_impression_range_urls(
+    base_url: str,
+    start: int = 10000,
+    step: int = 1000,
+    count: int = 50,
+) -> list:
+    """Generate a list of URLs partitioned by impression ranges.
+
+    Each URL covers [start + i*step, start + (i+1)*step - 1] impressions.
+    Returns list of (label, url) tuples.
+    """
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+    parsed = urlparse(base_url)
+    base_params = parse_qs(parsed.query, keep_blank_values=True)
+
+    # Flatten single-value lists from parse_qs
+    flat_params = {}
+    for k, v in base_params.items():
+        flat_params[k] = v[0] if len(v) == 1 else v
+
+    # Remove any existing impression params
+    for key in ['impressionsMinValue', 'impressionsMinUnit', 'impressionsMaxValue', 'impressionsMaxUnit']:
+        flat_params.pop(key, None)
+
+    urls = []
+    for i in range(count):
+        min_val = start + i * step
+        max_val = start + (i + 1) * step
+        params = {**flat_params}
+        params['impressionsMinValue'] = str(min_val)
+        params['impressionsMinUnit'] = 'none'
+        params['impressionsMaxValue'] = str(max_val)
+        params['impressionsMaxUnit'] = 'none'
+
+        new_query = urlencode(params, doseq=True)
+        url = urlunparse(parsed._replace(query=new_query))
+        label = f"{min_val}-{max_val}"
+        urls.append((label, url))
+
+    return urls
+
+
+async def run_impression_range_discovery(
+    base_url: str,
+    start: int = 10000,
+    step: int = 1000,
+    count: int = 50,
+    batch_size: int = 5,
+    playwright=None,
+    progress_callback=None,
+) -> dict:
+    """Run discovery across multiple impression ranges sequentially.
+
+    Each range gets its own scroll session. Companies DB is shared for dedup
+    across ranges (unknowns in range 1 become known in range 2).
+
+    Args:
+        base_url: Base LinkedIn Ad Library URL (country/date filters)
+        start: Starting impression value (default 10000)
+        step: Impression range step size (default 1000)
+        count: Number of ranges to process (default 50)
+        batch_size: Concurrent SBR sessions for detail processing
+        playwright: Playwright instance
+        progress_callback: Optional async callback(range_label, phase, stats)
+
+    Returns dict with per-range stats and totals.
+    """
+    import src.config as config
+    config.browser_config.MAX_CONCURRENT_PAGES = batch_size
+    config.MAX_CONCURRENT_PAGES = batch_size
+
+    urls = generate_impression_range_urls(base_url, start, step, count)
+    results = {}
+    totals = {
+        'total_cards': 0,
+        'total_unknown': 0,
+        'total_known_skipped': 0,
+        'total_processed': 0,
+        'ranges_completed': 0,
+        'ranges_empty': 0,
+    }
+
+    for i, (label, url) in enumerate(urls):
+        logger.info(f"=== Range {i+1}/{count}: {label} impressions ===")
+        logger.info(f"URL: {url}")
+
+        crawler = CompanyDiscoveryCrawler(country_code=f"R{label}", custom_url=url)
+
+        try:
+            # Phase 1: Scroll this range
+            sbr_browser, context, page = await create_fresh_sbr_connection(playwright)
+            try:
+                async with AsyncSessionLocal() as db:
+                    unknown = await crawler.discover_from_listing(page, db)
+            finally:
+                await sbr_browser.close()
+
+            range_stats = {
+                'label': label,
+                'url': url,
+                'cards_seen': crawler.total_cards_seen,
+                'unknown_found': len(unknown),
+                'known_skipped': crawler.known_count,
+            }
+
+            if progress_callback:
+                await progress_callback(label, 'scroll_done', range_stats)
+
+            # Phase 2: Process unknowns
+            if unknown:
+                async with AsyncSessionLocal() as db:
+                    processed = await crawler.process_unknown_advertisers(db, playwright)
+                range_stats['processed'] = processed
+            else:
+                range_stats['processed'] = 0
+
+            # Track if range was empty (0 cards = we've gone past the max impressions)
+            if crawler.total_cards_seen == 0:
+                totals['ranges_empty'] += 1
+                range_stats['empty'] = True
+                logger.info(f"Range {label}: empty (0 cards). May have exceeded max impressions.")
+                # Stop early if 3 consecutive empty ranges
+                if totals['ranges_empty'] >= 3:
+                    logger.info("3 consecutive empty ranges — stopping early")
+                    results[label] = range_stats
+                    break
+            else:
+                totals['ranges_empty'] = 0  # reset consecutive counter
+
+            totals['total_cards'] += crawler.total_cards_seen
+            totals['total_unknown'] += len(unknown)
+            totals['total_known_skipped'] += crawler.known_count
+            totals['total_processed'] += range_stats['processed']
+            totals['ranges_completed'] += 1
+
+            results[label] = range_stats
+            logger.info(
+                f"Range {label} done: {crawler.total_cards_seen} cards, "
+                f"{len(unknown)} unknown, {range_stats['processed']} processed"
+            )
+
+            if progress_callback:
+                await progress_callback(label, 'done', range_stats)
+
+        except Exception as e:
+            logger.error(f"Range {label} failed: {str(e)}")
+            results[label] = {'label': label, 'error': str(e)}
+
+    logger.info(
+        f"\n=== Impression Range Discovery Complete ===\n"
+        f"Ranges completed: {totals['ranges_completed']}/{count}\n"
+        f"Total cards seen: {totals['total_cards']}\n"
+        f"Total unknown found: {totals['total_unknown']}\n"
+        f"Total processed: {totals['total_processed']}\n"
+        f"Total known skipped: {totals['total_known_skipped']}"
+    )
+
+    return {'ranges': results, 'totals': totals}
 
 
 async def run_parallel_discovery(

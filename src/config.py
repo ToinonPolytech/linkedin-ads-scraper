@@ -53,9 +53,14 @@ class CrawlerConfig:
     PARALLEL_CHUNKS = 2
 
     # Discovery mode settings
-    DISCOVERY_MAX_SCROLL_COUNT = 500
+    DISCOVERY_MAX_SCROLL_COUNT = 5000
     DISCOVERY_CONCURRENT_COUNTRIES = 3
     DEFAULT_COUNTRIES = ["US", "GB", "DE", "FR", "CA", "AU", "IN", "BR", "NL", "SE"]
+
+    # Impression-range partitioning
+    IMPRESSION_RANGE_START = 10000
+    IMPRESSION_RANGE_STEP = 1000
+    IMPRESSION_RANGE_COUNT = 50  # number of ranges to generate
 
 
 class LogConfig:

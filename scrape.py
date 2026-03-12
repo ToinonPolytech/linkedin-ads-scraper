@@ -190,7 +190,7 @@ async def run_scrape(args):
 
 async def run_discover(args):
     """Run the company discovery flow."""
-    from src.discovery import run_parallel_discovery, CompanyDiscoveryCrawler
+    from src.discovery import run_parallel_discovery, run_impression_range_discovery, CompanyDiscoveryCrawler
     from src.utils import create_fresh_sbr_connection
     import src.config as config
 
@@ -211,7 +211,36 @@ async def run_discover(args):
     config.browser_config.MAX_CONCURRENT_PAGES = batch_size
     config.MAX_CONCURRENT_PAGES = batch_size
 
-    if args.url:
+    if args.url and args.impressions_start is not None:
+        # Impression-range partitioned discovery
+        logger.info(f"Discovery mode: impression ranges")
+        logger.info(f"Base URL: {args.url}")
+        logger.info(
+            f"Ranges: {args.impressions_start} to "
+            f"{args.impressions_start + args.impressions_step * args.impressions_count}, "
+            f"step={args.impressions_step}, count={args.impressions_count}"
+        )
+        logger.info(f"Detail processing batch size: {batch_size}")
+
+        async with async_playwright() as playwright:
+            results = await run_impression_range_discovery(
+                base_url=args.url,
+                start=args.impressions_start,
+                step=args.impressions_step,
+                count=args.impressions_count,
+                batch_size=batch_size,
+                playwright=playwright,
+            )
+
+        totals = results.get('totals', {})
+        logger.info("\n--- Impression Range Discovery Results ---")
+        logger.info(f"  Ranges completed: {totals.get('ranges_completed', 0)}/{args.impressions_count}")
+        logger.info(f"  Total cards seen: {totals.get('total_cards', 0)}")
+        logger.info(f"  Total unknown found: {totals.get('total_unknown', 0)}")
+        logger.info(f"  Total processed: {totals.get('total_processed', 0)}")
+        logger.info(f"  Total known skipped: {totals.get('total_known_skipped', 0)}")
+
+    elif args.url:
         # Custom URL mode: single session with the provided URL
         logger.info(f"Discovery mode: custom URL = {args.url}")
         logger.info(f"Detail processing batch size: {batch_size}")
@@ -354,6 +383,18 @@ async def main():
     discover_parser.add_argument(
         "--batch-size", type=int, default=5,
         help="Concurrent SBR sessions for detail page processing (default: 5)"
+    )
+    discover_parser.add_argument(
+        "--impressions-start", type=int, default=None,
+        help="Start impression-range partitioning at this value (e.g., 10000)"
+    )
+    discover_parser.add_argument(
+        "--impressions-step", type=int, default=1000,
+        help="Impression range step size (default: 1000)"
+    )
+    discover_parser.add_argument(
+        "--impressions-count", type=int, default=50,
+        help="Number of impression ranges to process (default: 50)"
     )
     discover_parser.add_argument(
         "--export", choices=["json", "csv"],

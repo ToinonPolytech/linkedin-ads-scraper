@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from src.utils import init_db, generate_linkedin_url, setup_browser_context, backfill_companies_from_ads
 from src.models import LinkedInAd, Company
 from src.crawler import AsyncLinkedInCrawler
-from src.discovery import run_parallel_discovery
+from src.discovery import run_parallel_discovery, run_impression_range_discovery
 from src.logger import setup_logger
 from src.database import Base, engine, AsyncSessionLocal, get_db
 from src.config import brightdata_config, crawler_config
@@ -39,7 +39,8 @@ async def root():
         "endpoints": {
             "/crawl?company_id=X": "Start scraping (runs in background)",
             "/status/{job_id}": "Check scraping job status",
-            "/discover?countries=US,UK": "Start company discovery job",
+            "/discover?countries=US,UK": "Discover by country",
+            "/discover?url=URL&impressions_start=10000": "Discover by impression ranges",
             "/companies": "List all discovered companies",
             "/check-ads/{company_id}": "Get all ads for a company",
             "/check-ad/{ad_id}": "Get a specific ad",
@@ -237,24 +238,84 @@ async def _run_discovery_url(custom_url: str, job_id: str, batch_size: int = 5):
         logger.error(f"Job {job_id}: Discovery failed — {str(e)}")
 
 
+async def _run_discovery_impressions(
+    base_url: str, job_id: str, start: int, step: int, count: int, batch_size: int
+):
+    """Background task for impression-range partitioned discovery."""
+    _active_jobs[job_id]["status"] = "running"
+    try:
+        async def progress_callback(label, phase, stats):
+            _active_jobs[job_id]["current_range"] = label
+            _active_jobs[job_id]["current_phase"] = phase
+            _active_jobs[job_id]["range_stats"] = _active_jobs[job_id].get("range_stats", {})
+            _active_jobs[job_id]["range_stats"][label] = stats
+
+        async with async_playwright() as playwright:
+            results = await run_impression_range_discovery(
+                base_url=base_url,
+                start=start,
+                step=step,
+                count=count,
+                batch_size=batch_size,
+                playwright=playwright,
+                progress_callback=progress_callback,
+            )
+
+        _active_jobs[job_id]["status"] = "completed"
+        _active_jobs[job_id]["results"] = results.get("totals", {})
+        _active_jobs[job_id]["completed_at"] = datetime.now().isoformat()
+        logger.info(f"Job {job_id}: Impression range discovery completed")
+
+    except Exception as e:
+        _active_jobs[job_id]["status"] = "failed"
+        _active_jobs[job_id]["error"] = str(e)
+        logger.error(f"Job {job_id}: Impression range discovery failed — {str(e)}")
+
+
 @app.get("/discover")
 async def discover(
     background_tasks: BackgroundTasks,
     countries: str = None,
     url: str = None,
     batch_size: int = 5,
+    impressions_start: int = None,
+    impressions_step: int = 1000,
+    impressions_count: int = 50,
 ):
     """Start a company discovery job.
 
-    Use either ?countries=US,UK or ?url=<linkedin_ad_library_url>
-    Optional: &batch_size=5 (concurrent detail page sessions)
+    Modes:
+    - ?countries=US,UK — discover by country
+    - ?url=<linkedin_ad_library_url> — discover from custom URL
+    - ?url=<base_url>&impressions_start=10000 — partition by impression ranges
+
+    Options:
+    - &batch_size=5 — concurrent detail page sessions
+    - &impressions_step=1000 — impression range step size (default 1000)
+    - &impressions_count=50 — number of ranges to process (default 50)
     """
     if not countries and not url:
         raise HTTPException(status_code=400, detail="Provide either 'countries' or 'url' parameter")
 
     job_id = f"discover_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    if url:
+    if url and impressions_start is not None:
+        # Impression-range partitioned discovery
+        _active_jobs[job_id] = {
+            "type": "discovery_impressions",
+            "base_url": url,
+            "impressions_start": impressions_start,
+            "impressions_step": impressions_step,
+            "impressions_count": impressions_count,
+            "batch_size": batch_size,
+            "status": "queued",
+            "started_at": datetime.now().isoformat(),
+        }
+        background_tasks.add_task(
+            _run_discovery_impressions, url, job_id,
+            impressions_start, impressions_step, impressions_count, batch_size
+        )
+    elif url:
         _active_jobs[job_id] = {
             "type": "discovery_url",
             "url": url,
