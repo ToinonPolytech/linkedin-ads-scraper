@@ -170,14 +170,15 @@ class CompanyDiscoveryCrawler:
         )
         return self.unknown_advertisers
 
-    async def process_unknown_advertisers(self, db, playwright) -> int:
+    async def process_unknown_advertisers(self, db, playwright, batch_size: int = None) -> int:
         """Visit detail pages for unknown advertisers, extract company info."""
         total = len(self.unknown_advertisers)
         if total == 0:
             self.logger.info("No unknown advertisers to process")
             return 0
 
-        batch_size = min(MAX_CONCURRENT_PAGES, total)
+        import src.config as _cfg
+        batch_size = batch_size or min(_cfg.MAX_CONCURRENT_PAGES, total)
         self.logger.info(
             f"Processing {total} unknown advertisers "
             f"(batch size: {batch_size})"
@@ -412,10 +413,6 @@ async def run_impression_range_discovery(
 
     Returns dict with per-range stats and totals.
     """
-    import src.config as config
-    config.browser_config.MAX_CONCURRENT_PAGES = batch_size
-    config.MAX_CONCURRENT_PAGES = batch_size
-
     urls = generate_impression_range_urls(base_url, start, step, count)
     results = {}
     totals = {
@@ -456,7 +453,7 @@ async def run_impression_range_discovery(
             # Phase 2: Process unknowns
             if unknown:
                 async with AsyncSessionLocal() as db:
-                    processed = await crawler.process_unknown_advertisers(db, playwright)
+                    processed = await crawler.process_unknown_advertisers(db, playwright, batch_size=batch_size)
                 range_stats['processed'] = processed
             else:
                 range_stats['processed'] = 0

@@ -53,7 +53,7 @@ class CrawlerConfig:
     PARALLEL_CHUNKS = 2
 
     # Discovery mode settings
-    DISCOVERY_MAX_SCROLL_COUNT = 5000
+    DISCOVERY_MAX_SCROLL_COUNT = 200
     DISCOVERY_CONCURRENT_COUNTRIES = 3
     DEFAULT_COUNTRIES = ["US", "GB", "DE", "FR", "CA", "AU", "IN", "BR", "NL", "SE"]
 

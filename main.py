@@ -223,7 +223,7 @@ async def _run_discovery_url(custom_url: str, job_id: str, batch_size: int = 5):
             if unknown:
                 _active_jobs[job_id]["status"] = "processing_details"
                 async with AsyncSessionLocal() as db:
-                    processed = await crawler.process_unknown_advertisers(db, playwright)
+                    processed = await crawler.process_unknown_advertisers(db, playwright, batch_size=batch_size)
                 _active_jobs[job_id]["phase2"] = {"processed": processed}
             else:
                 _active_jobs[job_id]["phase2"] = {"processed": 0, "note": "all advertisers already known"}
