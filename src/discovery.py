@@ -28,6 +28,7 @@ from src.utils import (
     upsert_company,
     create_fresh_sbr_connection,
     clean_text,
+    flush_supabase_buffer,
 )
 from src.database import AsyncSessionLocal
 from src.logger import setup_logger
@@ -239,6 +240,9 @@ class CompanyDiscoveryCrawler:
                 f"Failed: {failed}"
             )
             await asyncio.sleep(batch_delay)
+
+        # Flush any remaining Supabase buffer
+        await flush_supabase_buffer()
 
         self.logger.info(
             f"[{self.country_code}] Discovery complete: "

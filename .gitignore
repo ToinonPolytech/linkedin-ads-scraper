@@ -15,3 +15,15 @@ venv/
 # Exports
 ads_*.json
 ads_*.csv
+companies.csv
+companies_*.json
+
+# macOS
+.DS_Store
+
+# SQLite WAL files
+*.db-shm
+*.db-wal
+
+# Claude
+.claude/settings.local.json

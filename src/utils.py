@@ -1,5 +1,9 @@
 from datetime import datetime
 import re
+import os
+import json
+import urllib.request
+import urllib.error
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 import asyncio
@@ -13,6 +17,87 @@ import time
 import logging
 
 logger = logging.getLogger(__name__)
+
+# ── Supabase sync config ──
+SUPABASE_INGEST_URL = os.environ.get(
+    "SUPABASE_INGEST_URL",
+    "https://raufchclngrralnzvags.supabase.co/functions/v1/ingest-companies",
+)
+SUPABASE_INGEST_KEY = os.environ.get("SUPABASE_INGEST_KEY", "")
+
+# Buffer for batching Supabase pushes
+_supabase_buffer: list[dict] = []
+_supabase_buffer_lock = asyncio.Lock()
+SUPABASE_BATCH_SIZE = 50
+
+
+def _map_company_to_supabase(company_data: dict) -> dict:
+    """Map local company fields to Supabase schema."""
+    return {
+        "advertiser_name": company_data.get("advertiser_name"),
+        "ad_type": company_data.get("ad_type", "company_ad"),
+        "company_id": company_data.get("company_id"),
+        "company_url": company_data.get("company_url"),
+        "profile_url": company_data.get("profile_url"),
+        "promoted_by_name": company_data.get("promoted_by_name"),
+        "promoted_by_company_id": company_data.get("promoted_by_company_id"),
+        "discovery_range": company_data.get("first_seen_country"),
+    }
+
+
+def _push_to_supabase_sync(records: list[dict]) -> bool:
+    """Synchronously push a batch of records to Supabase. Returns True on success."""
+    if not SUPABASE_INGEST_KEY:
+        return False
+    try:
+        body = json.dumps(records).encode()
+        req = urllib.request.Request(
+            SUPABASE_INGEST_URL,
+            data=body,
+            headers={
+                "x-api-key": SUPABASE_INGEST_KEY,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode())
+            logger.info(f"Supabase sync: pushed {result.get('count', len(records))} records")
+            return True
+    except Exception as e:
+        logger.warning(f"Supabase sync failed: {e}")
+        return False
+
+
+async def sync_to_supabase(company_data: dict):
+    """Buffer a company record and flush to Supabase when batch is full."""
+    if not SUPABASE_INGEST_KEY:
+        return
+    record = _map_company_to_supabase(company_data)
+    batch = None
+    async with _supabase_buffer_lock:
+        _supabase_buffer.append(record)
+        if len(_supabase_buffer) >= SUPABASE_BATCH_SIZE:
+            batch = _supabase_buffer.copy()
+            _supabase_buffer.clear()
+    if batch is None:
+        return  # not full yet
+    # Push batch in a thread to avoid blocking the event loop
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _push_to_supabase_sync, batch)
+
+
+async def flush_supabase_buffer():
+    """Flush any remaining records in the Supabase buffer."""
+    if not SUPABASE_INGEST_KEY:
+        return
+    async with _supabase_buffer_lock:
+        if not _supabase_buffer:
+            return
+        batch = _supabase_buffer.copy()
+        _supabase_buffer.clear()
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _push_to_supabase_sync, batch)
 
 
 async def init_db():
@@ -197,7 +282,8 @@ async def get_known_advertiser_names(db) -> set:
 
 
 async def upsert_company(db, company_data: dict) -> str:
-    """Insert or update a company record. Returns 'new', 'updated', or 'existing'."""
+    """Insert or update a company record. Returns 'new', 'updated', or 'existing'.
+    Also syncs to Supabase for new/updated records."""
     from sqlalchemy import select as sa_select
     existing = await db.execute(
         sa_select(Company).where(Company.advertiser_name == company_data['advertiser_name'])
@@ -214,6 +300,7 @@ async def upsert_company(db, company_data: dict) -> str:
                 needs_update = True
         if needs_update:
             await db.commit()
+            await sync_to_supabase(company_data)
             return 'updated'
         return 'existing'
     else:
@@ -222,6 +309,7 @@ async def upsert_company(db, company_data: dict) -> str:
         company = Company(**filtered)
         db.add(company)
         await db.commit()
+        await sync_to_supabase(company_data)
         return 'new'
 
 
